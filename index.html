@@ -465,8 +465,11 @@
         <div class="control-card">
           <span class="k">EXPLORE AREA</span>
           <select id="radius" aria-label="探索範囲">
-            <option value="700">700 m</option>
-            <option value="1000" selected>1.0 km</option>
+            <option value="500">500 m</option>
+            <!-- 既定を1.0km->700mへ。取得量は半径の2乗で効くので約半分になる。
+                 日本の市街地はOSMの建物網羅率が高く、1kmだとAndroid TVには重すぎる -->
+            <option value="700" selected>700 m</option>
+            <option value="1000">1.0 km</option>
             <option value="1400">1.4 km</option>
             <option value="2000">2.0 km</option>
           </select>
@@ -1903,10 +1906,13 @@
     prefSet(geoKey,result);setNetworkHealth('online','GEOCODE READY · '+result.name,'NOMINATIM · READY');return result;
   }
 
+  /* 速い順に並べる。providerCursorは「成功したら居座り、失敗したときだけ次へ回す」運用。
+     以前は成功時にも回していたため、拠点を切り替えるたびに別サーバへ当たり、
+     3件に1件は不安定なミラーから始まって時間切れになっていた */
   const OVERPASS=[
-    'https://overpass-api.de/api/interpreter',
-    'https://overpass.kumi.systems/api/interpreter',
-    'https://maps.mail.ru/osm/tools/overpass/api/interpreter'
+    'https://overpass.kumi.systems/api/interpreter',       // 一般に最速・混雑しにくい
+    'https://overpass-api.de/api/interpreter',             // 本家。混雑時は待たされる
+    'https://maps.mail.ru/osm/tools/overpass/api/interpreter'  // 最後の砦。到達不可のことも多い
   ];
   function overpassQuery(lat,lon,R){
     return '[out:json][timeout:'+OVERPASS_QUERY_TIMEOUT_S+'];('
@@ -1931,37 +1937,54 @@
       +'way["man_made"="communications_tower"](around:'+R+','+lat+','+lon+');'
       +'node["man_made"="tower"]["tower:type"~"observation|communication"](around:'+R+','+lat+','+lon+');'
       +'way["man_made"="tower"]["tower:type"~"observation|communication"](around:'+R+','+lat+','+lon+');'
-      +');out geom;';
+      +');out geom qt;';   // qt(クアッドタイル順)はid順より大量結果の書き出しが速い
   }
   async function overpass(lat,lon,R,controller=activeNetworkController){
     if(!navigator.onLine){setNetworkHealth('offline','OFFLINE · LOOKING FOR A VAULT COPY','OVERPASS · OFFLINE');throw new Error('offlineCacheMiss');}
-    /* 全エンドポイントが不調なら範囲を狭めてもう一巡する。同じ重さのクエリを3回投げ直しても
-       時間切れなら結局時間切れなので、密度の高い地域では半径を落とすほうが効く。
-       何も描けないよりは狭くても描けたほうがよい */
-    const radii=[R,Math.round(R*0.6)];let lastErr;
+    /* 取得できないときは半径を落として一巡し直す。データ量は半径の2乗で効くので、
+       同じ重さのクエリをサーバを変えて投げ直すより縮めるほうが確実に効く。
+       何も描けないよりは狭くても描けたほうがよい。
+       最初の半径は全エンドポイントを試すが、2回目以降は待ち時間が伸びすぎないよう
+       その時点の優先エンドポイントだけに絞る */
+    const radii=[R,Math.round(R*0.6),Math.round(R*0.36)];let lastErr;
     for(let r=0;r<radii.length;r++){
       const RR=radii[r],q=overpassQuery(lat,lon,RR);
-      const endpoints=OVERPASS.map((_,i)=>OVERPASS[(providerCursor+i)%OVERPASS.length]);
-      for(let i=0;i<endpoints.length;i++){
-        const ep=endpoints[i],host=ep.replace(/^https?:\/\//,'').split('/')[0];
+      const tries=r===0?OVERPASS.length:1;
+      /* 開始位置は一巡のあいだ固定する。ループ内でproviderCursorを進めると、
+         それと i の両方が加算されてサーバを1つ飛ばしてしまう */
+      const start=providerCursor;let rotate=false;
+      for(let i=0;i<tries;i++){
+        const ep=OVERPASS[(start+i)%OVERPASS.length],host=ep.replace(/^https?:\/\//,'').split('/')[0];
+        const t0=Date.now();let ticker=null;
         try{
           if(controller&&controller.signal.aborted)throw new DOMException('Request superseded','AbortError');
-          setNetworkHealth('online','GEOMETRY · '+(i+1)+'/'+endpoints.length+' · '+RR+'m · '+Math.round(NETWORK_BUDGET.overpassMs/1000)+'s BUDGET','OVERPASS · '+host);
+          setNetworkHealth('online','GEOMETRY · '+RR+'m · '+Math.round(NETWORK_BUDGET.overpassMs/1000)+'s BUDGET','OVERPASS · '+host);
+          /* 応答待ちの間、進捗バーは72%で頭打ちになり止まって見える。経過秒を出して
+             ハングと区別できるようにする。「取得中」の語はstatus()のbusy判定用 */
+          ticker=setInterval(function(){
+            status('建物データを取得中… ('+host+' / '+RR+'m / '+Math.round((Date.now()-t0)/1000)+'秒)');
+          },1000);
           const data=await fetchJsonBudget(ep,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},body:'data='+encodeURIComponent(q)},controller,NETWORK_BUDGET.overpassMs);
           if(!data||!Array.isArray(data.elements))throw new Error('invalid geometry payload');
-          providerCursor=(OVERPASS.indexOf(ep)+1)%OVERPASS.length;
+          /* サーバが[timeout:]や容量上限で打ち切ると、HTTP 200のままremarkだけ返る。
+             これを成功扱いすると「この範囲に建物データがありませんでした」と誤報するので、
+             同じ大きさで投げ直さずに次の(狭い)半径へ落とす。
+             部分結果が入っている場合は使ったほうがマシなので通す */
+          if(data.remark&&!data.elements.length){lastErr=new Error('overpass remark: '+data.remark);break;}
+          providerCursor=OVERPASS.indexOf(ep);   // 通ったサーバに居座る(成功時は回さない)
           setNetworkHealth('online','GEOMETRY READY · '+data.elements.length.toLocaleString()+' FEATURES'+(RR!==R?' · '+RR+'mに縮小':''),'OVERPASS · '+host+' · READY');
           return data;
         }catch(e){
           if(e&&e.name==='AbortError'&&controller&&controller.signal.aborted)throw e;
-          lastErr=e;setNetworkHealth('alert','PROVIDER FAILED · ROTATING','OVERPASS · '+host+' · RETRY');
-          if(i<endpoints.length-1)await sleep(240*(i+1),controller&&controller.signal);
-        }
+          lastErr=e;rotate=true;setNetworkHealth('alert','PROVIDER FAILED · ROTATING','OVERPASS · '+host+' · RETRY');
+          if(i<tries-1)await sleep(240*(i+1),controller&&controller.signal);
+        }finally{ if(ticker)clearInterval(ticker); }
       }
+      // この半径では全滅。次回は落ちたサーバの次から始める(remarkでbreakした場合は
+      // サーバ側は健全なので回さない)
+      if(rotate)providerCursor=(start+1)%OVERPASS.length;
       if(r<radii.length-1){
-        /* 「取得中」の語はstatus()のbusy判定に引っかける意図。ここで抜けると
-           描画中フラグが落ちてSITE PATROLが割り込んでくる */
-        status('範囲'+R+'mでは応答がありませんでした。'+radii[r+1]+'mに縮小して取得中…');
+        status('範囲'+radii[r]+'mでは応答がありませんでした。'+radii[r+1]+'mに縮小して取得中…');
         await sleep(600,controller&&controller.signal);
       }
     }
