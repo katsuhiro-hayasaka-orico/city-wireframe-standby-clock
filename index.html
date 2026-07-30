@@ -649,13 +649,13 @@
   <button id="recordReel" class="dock-btn reel" type="button" title="8秒の都市フライスルーをWebMで保存"><span class="dock-icon">●</span><span>REEL</span></button>
   <button id="compareView" class="dock-btn compare" type="button" title="現在のビューを比較用ベースラインとして固定"><span class="dock-icon">◫</span><span>COMPARE</span></button>
   <button id="saveSceneDock" class="dock-btn memory" type="button" title="現在の都市・視点・演出を保存"><span class="dock-icon">✦</span><span>SAVE SCENE</span></button>
-  <button id="sbToggleBtn" class="dock-btn" type="button" title="スタンバイ時計・カレンダー表示を切替（決定/OK・K　←→:フォント　↑:視点リセット　↓:シーン切替　1:TRAIN CAM　2:DRONE TOUR）"><span class="dock-icon">◔</span><span>CLOCK</span></button>
+  <button id="sbToggleBtn" class="dock-btn" type="button" title="スタンバイ時計・カレンダー表示を切替（決定/OK・K　←→:フォント　↑:視点リセット　↓:シーン切替　1〜7:拠点　CH+/CH-:拠点送り　8:TRAIN CAM　9:DRONE TOUR　0:CAMERA TOUR）"><span class="dock-icon">◔</span><span>CLOCK</span></button>
   <button id="openHelp" class="dock-btn" type="button" title="操作ヘルプ"><span class="dock-icon">?</span><span>HELP</span></button>
 </div>
 
 <div id="reelIndicator" aria-live="polite"><span class="reel-led"></span><span id="reelText">REEL · 00:00 / 00:08</span></div>
 <div id="lowerThird" aria-hidden="true"><span class="lt-bar"></span><div class="lt-copy"><span class="lt-eyebrow" id="ltEyebrow">LANDMARK TOUR</span><div id="ltName">—</div><span class="lt-sub" id="ltSub"></span></div><div class="lt-clock" id="ltClock">--:--</div></div>
-<div id="hint" class="hud glass"><span class="hint-key">DRAG</span> 回転　<span class="hint-key">CLICK</span> 建物選択　<span class="hint-key">SHIFT / 右DRAG</span> 移動　<span class="hint-key">SCROLL</span> ズーム　<span class="hint-key">DOUBLE CLICK</span> 中心化　<span class="hint-key">P</span> PRINT 2X　<span class="hint-key">SPACE</span> TOUR ON/OFF　<span class="hint-key">決定 / K</span> CLOCK　<span class="hint-key">← →</span> FONT　<span class="hint-key">↑</span> RESET VIEW　<span class="hint-key">↓</span> SCENE LOOK　<span class="hint-key">1</span> TRAIN CAM　<span class="hint-key">2</span> DRONE TOUR　<span class="hint-key">B</span> CHIME TEST</div>
+<div id="hint" class="hud glass"><span class="hint-key">DRAG</span> 回転　<span class="hint-key">CLICK</span> 建物選択　<span class="hint-key">SHIFT / 右DRAG</span> 移動　<span class="hint-key">SCROLL</span> ズーム　<span class="hint-key">DOUBLE CLICK</span> 中心化　<span class="hint-key">P</span> PRINT 2X　<span class="hint-key">SPACE</span> TOUR ON/OFF　<span class="hint-key">決定 / K</span> CLOCK　<span class="hint-key">← →</span> FONT　<span class="hint-key">↑</span> RESET VIEW　<span class="hint-key">↓</span> SCENE LOOK　<span class="hint-key">1〜7</span> 拠点　<span class="hint-key">CH+ / CH−</span> 拠点送り　<span class="hint-key">8</span> TRAIN CAM　<span class="hint-key">9</span> DRONE TOUR　<span class="hint-key">0</span> CAMERA TOUR　<span class="hint-key">B</span> CHIME TEST</div>
 <div id="attr" class="hud">MAP DATA © OpenStreetMap contributors<br>GEOCODING · NOMINATIM　GEOMETRY · OVERPASS</div>
 
 <!-- ================================================================
@@ -703,6 +703,11 @@
       <div class="help-line"><span>比較ベースラインを固定</span><span class="kbd">C</span></div>
       <div class="help-line"><span>現在のシーンを保存</span><span class="kbd">M</span></div>
       <div class="help-line"><span>現在の画像を保存</span><span class="kbd">CAPTURE</span></div>
+      <div class="help-line"><span>拠点を指定（1=麹町 … 7=博多駅南）</span><span class="kbd">1</span> 〜 <span class="kbd">7</span></div>
+      <div class="help-line"><span>次 / 前の拠点へ</span><span><span class="kbd">CH+</span> / <span class="kbd">CH−</span></span></div>
+      <div class="help-line"><span>TRAIN CAM / DRONE TOUR</span><span><span class="kbd">8</span> / <span class="kbd">9</span></span></div>
+      <div class="help-line"><span>CAMERA TOUR（視点リセット）</span><span><span class="kbd">0</span> / <span class="kbd">↑</span></span></div>
+      <div class="help-line"><span>スタンバイ時計を切替</span><span>決定 / <span class="kbd">K</span></span></div>
       <div class="help-line"><span>ヘルプを閉じる</span><span class="kbd">ESC</span></div>
     </div>
   </div>
@@ -3732,21 +3737,45 @@ function applySunMode(idx){
   sel.value = SUN_MODES[idx];
   drive(function(){ sel.dispatchEvent(new Event('change')); });
 }
+/* 表示中のチップだけを対象に、fromからdir方向の次の巡回先を探す。
+   編集UIでOFFにされた拠点はチップが存在しないので、そこで止まらないよう読み飛ばす。
+   自動送り(advanceSite)とリモコンのCH+/CH-(stepSite)の両方から使う */
+function nextSiteFrom(from, dir){
+  let idx = from;
+  for(let step = 0; step < SITE_TOUR.length; step++){
+    idx = (idx + dir + SITE_TOUR.length) % SITE_TOUR.length;
+    const chip = findSiteChip(SITE_TOUR[idx]);
+    if(chip) return { idx: idx, chip: chip };
+  }
+  return null;                                  // 巡回対象が1つも表示されていない
+}
 function advanceSite(){
   if(sceneBusy()) return;                       // 描画中は見送り、次の回に回す
-  // 編集UIでOFFにされた拠点はチップが存在しない。そこで止まらないよう次の拠点へ読み飛ばす
-  let chip = null, nextSite = siteIdx;
-  for(let step = 0; step < SITE_TOUR.length; step++){
-    nextSite = (nextSite + 1) % SITE_TOUR.length;
-    chip = findSiteChip(SITE_TOUR[nextSite]);
-    if(chip) break;
-  }
-  if(!chip) return;                             // 巡回対象が1つも表示されていない
+  const next = nextSiteFrom(siteIdx, 1);
+  if(!next) return;
   const nextSun = (sunIdx + 1) % SUN_MODES.length;
   applySunMode(nextSun);                        // ① 先にSUN STUDY(現在地の再描画が始まる)
-  drive(function(){ chip.click(); });           // ② 直後に拠点(①は破棄され、これだけが完走)
-  sunIdx = nextSun; siteIdx = nextSite;
+  drive(function(){ next.chip.click(); });      // ② 直後に拠点(①は破棄され、これだけが完走)
+  sunIdx = nextSun; siteIdx = next.idx;
   showToast(SITE_TOUR[siteIdx] + '　SUN ' + SUN_MODES[sunIdx], 3200);
+}
+
+/* --- リモコンからの拠点操作 ---
+   drive()で包まないのが肝。selfDrivenを立てずに.click()することで、下の#chips委譲
+   リスナーが手動操作として拾い、siteIdxの更新と15分タイマーの引き直しをやってくれる。
+   SUN STUDYは自動送りのときだけ進める(手動選択では動かさない)現状の方針を維持 */
+function gotoSite(i){
+  if(i < 0 || i >= SITE_TOUR.length) return;
+  const chip = findSiteChip(SITE_TOUR[i]);
+  if(!chip){ showToast(SITE_TOUR[i] + ' は表示OFFです（編集で有効化）', 2800); return; }
+  chip.click();
+  showToast(SITE_TOUR[i], 2600);
+}
+function stepSite(dir){
+  const next = nextSiteFrom(siteIdx, dir);
+  if(!next) return;
+  next.chip.click();
+  showToast(SITE_TOUR[next.idx], 2600);
 }
 function scheduleSitePatrol(){
   clearInterval(siteTimer);
@@ -3943,15 +3972,20 @@ setInterval(function(){ chime.check(); }, 1000);
 });
 
 /* ====================================================================
-   Android TVリモコン割当 (D-pad / 決定 / 戻る / メディアキー)
+   Android TVリモコン割当 (数字 / D-pad / 決定 / 戻る / チャンネル / メディアキー)
+   - 1〜7                : オリコ拠点を直接指定 (1=麹町 … 7=博多駅南)
+   - CH+ / CH-           : 次 / 前の拠点へ (機種差対策でPageUp/PageDownも受ける)
+   - 8 / 9 / 0           : TRAIN CAM / DRONE TOUR / CAMERA TOUR
    - 決定(OK/Enter)      : 時計HUDの表示切替
    - ← → (D-pad左右)     : フォント切替 (時計表示中のみ)
-   - ↑ (D-pad上)         : ドローンツアー ON/OFF
+   - ↑ (D-pad上)         : 視点リセット(CAMERA TOURへ)
    - ↓ (D-pad下)         : SCENE LOOK(環境プリセット)巡回
    - 戻る(Back/Backspace): 時計HUDを閉じる
    - 再生/一時停止        : ドローンツアー ON/OFF
    - 次へ/早送り          : 次のランドマークへフォーカス
    - キーボードのKも従来どおり時計切替として維持
+   ※ 拠点キーは時計HUD表示中でも効く(freeガードはフォーカスのみを見ており、
+      時計オーバーレイはフォーカスを取らないため)。時計の裏で拠点だけ差し替わる
    ==================================================================== */
 window.addEventListener('keydown', function(e){
   const ae = document.activeElement;
@@ -3979,10 +4013,19 @@ window.addEventListener('keydown', function(e){
       clickById('droneBtn'); e.preventDefault(); return;
     case 'MediaTrackNext': case 'MediaFastForward':
       clickById('nextLandmark'); e.preventDefault(); return;
-    case '1':                                             /* チャンネル1: TRAIN CAM(自動巡回もここから再スタート) */
+    case '1': case '2': case '3': case '4':               /* 数字1〜7: オリコ拠点を直接指定 */
+    case '5': case '6': case '7':                         /*   (選んだ拠点から15分タイマーを引き直す) */
+      gotoSite(Number(e.key) - 1); e.preventDefault(); return;
+    case '8':                                             /* チャンネル8: TRAIN CAM(自動巡回もここから再スタート) */
       setRotateMode('train'); e.preventDefault(); return;
-    case '2':                                             /* チャンネル2: DRONE TOUR(自動巡回もここから再スタート) */
+    case '9':                                             /* チャンネル9: DRONE TOUR(自動巡回もここから再スタート) */
       setRotateMode('drone'); e.preventDefault(); return;
+    case '0':                                             /* チャンネル0: CAMERA TOUR(D-pad上と同等) */
+      setRotateMode('tour'); e.preventDefault(); return;
+    case 'ChannelUp': case 'PageUp':                      /* CH+: 次の拠点へ */
+      stepSite(1); e.preventDefault(); return;            /*   (機種によりPageUpに載るため別名も受ける) */
+    case 'ChannelDown': case 'PageDown':                  /* CH-: 前の拠点へ */
+      stepSite(-1); e.preventDefault(); return;
     case 'b': case 'B':                                  /* チャイム試験再生/停止 */
       if(chime.isSounding()){ chime.stop(); showToast('🔕 チャイム停止'); }
       else{ chime.unlock(); chime.play(); showToast('🔔 チャイム試験再生（Bで停止）'); }
