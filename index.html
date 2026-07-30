@@ -1908,8 +1908,8 @@
     'https://overpass.kumi.systems/api/interpreter',
     'https://maps.mail.ru/osm/tools/overpass/api/interpreter'
   ];
-  async function overpass(lat,lon,R,controller=activeNetworkController){
-    const q='[out:json][timeout:35];('
+  function overpassQuery(lat,lon,R){
+    return '[out:json][timeout:'+OVERPASS_QUERY_TIMEOUT_S+'];('
       +'way["building"](around:'+R+','+lat+','+lon+');'
       +'relation["building"]["type"="multipolygon"](around:'+R+','+lat+','+lon+');'
       +'way["building:part"](around:'+R+','+lat+','+lon+');'
@@ -1932,20 +1932,37 @@
       +'node["man_made"="tower"]["tower:type"~"observation|communication"](around:'+R+','+lat+','+lon+');'
       +'way["man_made"="tower"]["tower:type"~"observation|communication"](around:'+R+','+lat+','+lon+');'
       +');out geom;';
+  }
+  async function overpass(lat,lon,R,controller=activeNetworkController){
     if(!navigator.onLine){setNetworkHealth('offline','OFFLINE · LOOKING FOR A VAULT COPY','OVERPASS · OFFLINE');throw new Error('offlineCacheMiss');}
-    const endpoints=OVERPASS.map((_,i)=>OVERPASS[(providerCursor+i)%OVERPASS.length]);let lastErr;
-    for(let i=0;i<endpoints.length;i++){
-      const ep=endpoints[i],host=ep.replace(/^https?:\/\//,'').split('/')[0];
-      try{
-        if(controller&&controller.signal.aborted)throw new DOMException('Request superseded','AbortError');
-        setNetworkHealth('online','GEOMETRY · '+(i+1)+'/'+endpoints.length+' · '+Math.round(NETWORK_BUDGET.overpassMs/1000)+'s BUDGET','OVERPASS · '+host);
-        const data=await fetchJsonBudget(ep,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},body:'data='+encodeURIComponent(q)},controller,NETWORK_BUDGET.overpassMs);
-        if(!data||!Array.isArray(data.elements))throw new Error('invalid geometry payload');
-        providerCursor=(OVERPASS.indexOf(ep)+1)%OVERPASS.length;setNetworkHealth('online','GEOMETRY READY · '+data.elements.length.toLocaleString()+' FEATURES','OVERPASS · '+host+' · READY');return data;
-      }catch(e){
-        if(e&&e.name==='AbortError'&&controller&&controller.signal.aborted)throw e;
-        lastErr=e;setNetworkHealth('alert','PROVIDER FAILED · ROTATING','OVERPASS · '+host+' · RETRY');
-        if(i<endpoints.length-1)await sleep(240*(i+1),controller&&controller.signal);
+    /* 全エンドポイントが不調なら範囲を狭めてもう一巡する。同じ重さのクエリを3回投げ直しても
+       時間切れなら結局時間切れなので、密度の高い地域では半径を落とすほうが効く。
+       何も描けないよりは狭くても描けたほうがよい */
+    const radii=[R,Math.round(R*0.6)];let lastErr;
+    for(let r=0;r<radii.length;r++){
+      const RR=radii[r],q=overpassQuery(lat,lon,RR);
+      const endpoints=OVERPASS.map((_,i)=>OVERPASS[(providerCursor+i)%OVERPASS.length]);
+      for(let i=0;i<endpoints.length;i++){
+        const ep=endpoints[i],host=ep.replace(/^https?:\/\//,'').split('/')[0];
+        try{
+          if(controller&&controller.signal.aborted)throw new DOMException('Request superseded','AbortError');
+          setNetworkHealth('online','GEOMETRY · '+(i+1)+'/'+endpoints.length+' · '+RR+'m · '+Math.round(NETWORK_BUDGET.overpassMs/1000)+'s BUDGET','OVERPASS · '+host);
+          const data=await fetchJsonBudget(ep,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},body:'data='+encodeURIComponent(q)},controller,NETWORK_BUDGET.overpassMs);
+          if(!data||!Array.isArray(data.elements))throw new Error('invalid geometry payload');
+          providerCursor=(OVERPASS.indexOf(ep)+1)%OVERPASS.length;
+          setNetworkHealth('online','GEOMETRY READY · '+data.elements.length.toLocaleString()+' FEATURES'+(RR!==R?' · '+RR+'mに縮小':''),'OVERPASS · '+host+' · READY');
+          return data;
+        }catch(e){
+          if(e&&e.name==='AbortError'&&controller&&controller.signal.aborted)throw e;
+          lastErr=e;setNetworkHealth('alert','PROVIDER FAILED · ROTATING','OVERPASS · '+host+' · RETRY');
+          if(i<endpoints.length-1)await sleep(240*(i+1),controller&&controller.signal);
+        }
+      }
+      if(r<radii.length-1){
+        /* 「取得中」の語はstatus()のbusy判定に引っかける意図。ここで抜けると
+           描画中フラグが落ちてSITE PATROLが割り込んでくる */
+        status('範囲'+R+'mでは応答がありませんでした。'+radii[r+1]+'mに縮小して取得中…');
+        await sleep(600,controller&&controller.signal);
       }
     }
     throw lastErr||new Error('overpass failed');
@@ -3091,7 +3108,11 @@
   let activeNetworkController=null, lastNominatimAt=0, providerCursor=0;
   let lastRetryRequest=null, cacheVaultEntries=[], adaptiveFrameGuard=true, runtimeDegraded=false;
   let perfFrameCount=0, perfWindowStart=performance.now(), perfFps=0, perfLowWindows=0, perfHighWindows=0;
-  const NETWORK_BUDGET={geoMs:9000,overpassMs:14000,minGeoGap:1100,vaultLimit:14};
+  /* overpassMsはクエリ側の[timeout:]より必ず長くすること。短いとサーバが許された時間を
+     使い切る前にクライアントが切ってしまい、密度の高い地域が永久に描画できなくなる。
+     クエリの[timeout:]はOVERPASS_QUERY_TIMEOUT_Sから組み立てて両者がズレないようにしている */
+  const NETWORK_BUDGET={geoMs:9000,overpassMs:45000,minGeoGap:1100,vaultLimit:14};
+  const OVERPASS_QUERY_TIMEOUT_S=35;            // サーバ側の実行上限 < overpassMs(45s)
 
   function setHealthPill(id,kind,text){
     const el=document.getElementById(id);if(!el)return;
@@ -3753,6 +3774,7 @@ function advanceSite(){
   if(sceneBusy()) return;                       // 描画中は見送り、次の回に回す
   const next = nextSiteFrom(siteIdx, 1);
   if(!next) return;
+  cancelPendingSite();                          // 直前のキー操作が残っていれば自動送りを優先
   const nextSun = (sunIdx + 1) % SUN_MODES.length;
   applySunMode(nextSun);                        // ① 先にSUN STUDY(現在地の再描画が始まる)
   drive(function(){ next.chip.click(); });      // ② 直後に拠点(①は破棄され、これだけが完走)
@@ -3764,17 +3786,35 @@ function advanceSite(){
    drive()で包まないのが肝。selfDrivenを立てずに.click()することで、下の#chips委譲
    リスナーが手動操作として拾い、siteIdxの更新と15分タイマーの引き直しをやってくれる。
    SUN STUDYは自動送りのときだけ進める(手動選択では動かさない)現状の方針を維持 */
+/* 連打対策のデバウンス。押した数だけOverpassへクエリが飛ぶと、render()がクライアント側を
+   abortしてもサーバは受理済みのクエリを実行し続けるため、公開エンドポイントの同時実行枠
+   (overpass-api.deはIPあたり2本)を食い潰し、後続が軒並みタイムアウトする。
+   トーストは即座に出して反応は返しつつ、実際の取得は最後の1回だけにする */
+const SITE_KEY_DEBOUNCE_MS = 600;
+let pendingSiteIdx = -1, siteClickTimer = null;
+function cancelPendingSite(){ clearTimeout(siteClickTimer); siteClickTimer = null; pendingSiteIdx = -1; }
+function requestSite(i){
+  pendingSiteIdx = i;
+  clearTimeout(siteClickTimer);
+  siteClickTimer = setTimeout(function(){
+    const target = pendingSiteIdx;
+    cancelPendingSite();
+    const chip = findSiteChip(SITE_TOUR[target]);   // チップは作り直されるので発火時に引き直す
+    if(chip) chip.click();
+  }, SITE_KEY_DEBOUNCE_MS);
+}
 function gotoSite(i){
   if(i < 0 || i >= SITE_TOUR.length) return;
-  const chip = findSiteChip(SITE_TOUR[i]);
-  if(!chip){ showToast(SITE_TOUR[i] + ' は表示OFFです（編集で有効化）', 2800); return; }
-  chip.click();
+  if(!findSiteChip(SITE_TOUR[i])){ showToast(SITE_TOUR[i] + ' は表示OFFです（編集で有効化）', 2800); return; }
+  requestSite(i);
   showToast(SITE_TOUR[i], 2600);
 }
 function stepSite(dir){
-  const next = nextSiteFrom(siteIdx, dir);
+  // 連打中は保留中の行き先を起点にする。CH+を3回押せば3つ先へ進む
+  const from = pendingSiteIdx >= 0 ? pendingSiteIdx : siteIdx;
+  const next = nextSiteFrom(from, dir);
   if(!next) return;
-  next.chip.click();
+  requestSite(next.idx);
   showToast(SITE_TOUR[next.idx], 2600);
 }
 function scheduleSitePatrol(){
